@@ -382,7 +382,7 @@ class DockerSpawner(Spawner):
         `extra_host_config` take precedence over their global counterparts.
         
         """
-        self.log.debug("OPTION: %s", self.user_options)
+        self.log.info("OPTION: %s", self.user_options)
         container = yield self.get_container()
         if container is None:
             image = image or self.container_image
