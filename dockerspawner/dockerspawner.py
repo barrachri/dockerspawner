@@ -54,7 +54,7 @@ class DockerSpawner(Spawner):
                 kwargs = kwargs_from_env(
                     assert_hostname=self.tls_assert_hostname
                 )
-                client = docker.Client(version='auto', **kwargs)
+                client = docker.APIClient(version='auto', **kwargs)
             else:
                 if self.tls:
                     tls_config = True
@@ -68,7 +68,7 @@ class DockerSpawner(Spawner):
                     tls_config = None
 
                 docker_host = os.environ.get('DOCKER_HOST', 'unix://var/run/docker.sock')
-                client = docker.Client(base_url=docker_host, tls=tls_config, version='auto')
+                client = docker.APIClient(base_url=docker_host, tls=tls_config, version='auto')
             cls._client = client
         return cls._client
 
@@ -155,6 +155,8 @@ class DockerSpawner(Spawner):
     extra_create_kwargs = Dict(config=True, help="Additional args to pass for container create")
     extra_start_kwargs = Dict(config=True, help="Additional args to pass for container start")
     extra_host_config = Dict(config=True, help="Additional args to create_host_config for container create")
+    
+    swarm = Bool(False).tag(config=True, help="If True use the concept of services instead of containers")
 
     _container_safe_chars = set(string.ascii_letters + string.digits + '-')
     _container_escape_char = '_'
@@ -378,8 +380,9 @@ class DockerSpawner(Spawner):
 
         Per-instance `extra_create_kwargs`, `extra_start_kwargs`, and
         `extra_host_config` take precedence over their global counterparts.
-
+        
         """
+        self.log.debug("OPTION: %s", self.user_options)
         container = yield self.get_container()
         if container is None:
             image = image or self.container_image
@@ -396,6 +399,14 @@ class DockerSpawner(Spawner):
                 # be directly configured. If so, use it to set mem_limit. Note that
                 # this will still be overriden by extra_create_kwargs
                 create_kwargs['mem_limit'] = self.mem_limit
+                
+                
+            if hasattr(self, 'cpu_limit') and self.cpu_limit is not None:
+                # If jupyterhub version > 0.7, cpu_limit is a traitlet that can
+                # be directly configured. If so, use it to set cpu_limit. Note that
+                # this will still be overriden by extra_create_kwargs
+                create_kwargs['cpu_limit'] = self.cpu_limit
+                
             create_kwargs.update(self.extra_create_kwargs)
             if extra_create_kwargs:
                 create_kwargs.update(extra_create_kwargs)
@@ -416,11 +427,19 @@ class DockerSpawner(Spawner):
             host_config = self.client.create_host_config(**host_config)
             create_kwargs.setdefault('host_config', {}).update(host_config)
 
-            # create the container
-            resp = yield self.docker('create_container', **create_kwargs)
-            self.container_id = resp['Id']
+            # create the container or service
+            if self.swarm:
+                container_spec = docker.types.ContainerSpec(image=image)
+                resources = docker.types.Resources(mem_limit=create_kwargs['mem_limit'] )
+                task_tmpl = docker.types.TaskTemplate(container_spec, resources)
+                resp = yield self.docker('create_service', task_tmpl, name=self.container_name)
+                self.container_id = resp['ID']
+            else:
+                resp = yield self.docker('create_container', **create_kwargs)
+                self.container_id = resp['Id']
+                
             self.log.info(
-                "Created container '%s' (id: %s) from image %s",
+                "Created service/container '%s' (id: %s) from image %s",
                 self.container_name, self.container_id[:7], image)
 
         else:
@@ -505,6 +524,8 @@ class DockerSpawner(Spawner):
         """Stop the container
 
         Consider using pause/unpause when docker-py adds support
+        
+        
         """
         self.log.info(
             "Stopping container %s (id: %s)",
@@ -542,5 +563,3 @@ class DockerSpawner(Spawner):
                 v = v['bind']
             binds[_fmt(k)] = {'bind': _fmt(v), 'mode': m}
         return binds
-
-
